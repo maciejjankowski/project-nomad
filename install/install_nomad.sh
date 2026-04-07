@@ -31,12 +31,14 @@ GREEN='\033[1;32m' # Light Green.
 WHIPTAIL_TITLE="Project N.O.M.A.D Installation"
 NOMAD_DIR="/opt/project-nomad"
 MANAGEMENT_COMPOSE_FILE_URL="https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/management_compose.yaml"
+MANAGEMENT_COMPOSE_FILE_MACOS_URL="https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/management_compose_macos.yaml"
 START_SCRIPT_URL="https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/start_nomad.sh"
 STOP_SCRIPT_URL="https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/stop_nomad.sh"
 UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/update_nomad.sh"
 script_option_debug='true'
 accepted_terms='false'
 local_ip_address=''
+OS_TYPE=''
 
 ###################################################################################################################################################################################################
 #                                                                                                                                                                                                 #
@@ -52,6 +54,22 @@ header() {
 header_red() {
   if [[ "${script_option_debug}" != 'true' ]]; then clear; clear; fi
   echo -e "${RED}#########################################################################${RESET}\\n"
+}
+
+detect_os() {
+  local uname_out
+  uname_out="$(uname -s)"
+  case "${uname_out}" in
+    Linux*)   OS_TYPE=Linux;;
+    Darwin*)  OS_TYPE=macOS;;
+    *)        OS_TYPE=Unknown;;
+  esac
+  echo -e "${GREEN}#${RESET} Detected OS: ${OS_TYPE}\\n"
+  if [[ "$OS_TYPE" == "Unknown" ]]; then
+    header_red
+    echo -e "${RED}#${RESET} Unsupported operating system: ${uname_out}. This script supports Linux (Debian-based) and macOS only.\\n"
+    exit 1
+  fi
 }
 
 check_has_sudo() {
@@ -94,8 +112,8 @@ ensure_dependencies_installed() {
     missing_deps+=("curl")
   fi
 
-  # Check for gpg (required for NVIDIA container toolkit keyring)
-  if ! command -v gpg &> /dev/null; then
+  # Check for gpg (required for NVIDIA container toolkit keyring on Linux)
+  if [[ "$OS_TYPE" == "Linux" ]] && ! command -v gpg &> /dev/null; then
     missing_deps+=("gpg")
   fi
 
@@ -106,8 +124,17 @@ ensure_dependencies_installed() {
 
   if [[ ${#missing_deps[@]} -gt 0 ]]; then
     echo -e "${YELLOW}#${RESET} Installing required dependencies: ${missing_deps[*]}...\\n"
-    sudo apt-get update
-    sudo apt-get install -y "${missing_deps[@]}"
+
+    if [[ "$OS_TYPE" == "macOS" ]]; then
+      if ! command -v brew &> /dev/null; then
+        echo -e "${RED}#${RESET} Homebrew is not installed. Please install Homebrew first: https://brew.sh"
+        exit 1
+      fi
+      brew install "${missing_deps[@]}"
+    else
+      sudo apt-get update
+      sudo apt-get install -y "${missing_deps[@]}"
+    fi
 
     # Verify installation
     for dep in "${missing_deps[@]}"; do
@@ -144,6 +171,11 @@ generateRandomPass() {
 ensure_docker_installed() {
   if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}#${RESET} Docker not found. Installing Docker...\\n"
+
+    if [[ "$OS_TYPE" == "macOS" ]]; then
+      echo -e "${RED}#${RESET} Docker is not installed. Please install Docker Desktop for Mac from https://www.docker.com/products/docker-desktop/ and start it before running this script again."
+      exit 1
+    fi
     
     # Update package database
     sudo apt-get update
@@ -186,18 +218,39 @@ ensure_docker_installed() {
   else
     echo -e "${GREEN}#${RESET} Docker is already installed.\\n"
     
-    # Check if Docker service is running
-    if ! systemctl is-active --quiet docker; then
-      echo -e "${YELLOW}#${RESET} Docker is installed but not running. Attempting to start Docker...\\n"
-      sudo systemctl start docker
-      if ! systemctl is-active --quiet docker; then
-        echo -e "${RED}#${RESET} Failed to start Docker. Please check the Docker service status and try again."
-        exit 1
+    if [[ "$OS_TYPE" == "macOS" ]]; then
+      # On macOS, Docker runs as Docker Desktop — use `docker info` to check if it is running
+      if ! docker info &> /dev/null 2>&1; then
+        echo -e "${YELLOW}#${RESET} Docker Desktop is installed but not running. Attempting to start it...\\n"
+        open -a Docker
+        # Wait up to 60 seconds for Docker to become available
+        local retries=30
+        while ! docker info &> /dev/null 2>&1 && [[ $retries -gt 0 ]]; do
+          sleep 2
+          ((retries--))
+        done
+        if ! docker info &> /dev/null 2>&1; then
+          echo -e "${RED}#${RESET} Docker Desktop did not start in time. Please start Docker Desktop manually and run this script again."
+          exit 1
+        fi
+        echo -e "${GREEN}#${RESET} Docker Desktop started successfully.\\n"
       else
-        echo -e "${GREEN}#${RESET} Docker service started successfully.\\n"
+        echo -e "${GREEN}#${RESET} Docker Desktop is running.\\n"
       fi
     else
-      echo -e "${GREEN}#${RESET} Docker service is already running.\\n"
+      # Check if Docker service is running (Linux / systemd)
+      if ! systemctl is-active --quiet docker; then
+        echo -e "${YELLOW}#${RESET} Docker is installed but not running. Attempting to start Docker...\\n"
+        sudo systemctl start docker
+        if ! systemctl is-active --quiet docker; then
+          echo -e "${RED}#${RESET} Failed to start Docker. Please check the Docker service status and try again."
+          exit 1
+        else
+          echo -e "${GREEN}#${RESET} Docker service started successfully.\\n"
+        fi
+      else
+        echo -e "${GREEN}#${RESET} Docker service is already running.\\n"
+      fi
     fi
   fi
 }
@@ -215,6 +268,12 @@ check_docker_compose() {
 setup_nvidia_container_toolkit() {
   # This function attempts to set up NVIDIA GPU support but is non-blocking
   # Any failures will result in warnings but will NOT stop the installation process
+
+  # NVIDIA GPUs are not supported on macOS — skip entirely
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    echo -e "${YELLOW}#${RESET} Skipping NVIDIA container toolkit setup (not supported on macOS).\\n"
+    return 0
+  fi
   
   echo -e "${YELLOW}#${RESET} Checking for NVIDIA GPU...\\n"
   
@@ -394,9 +453,16 @@ create_nomad_directory(){
 
 download_management_compose_file() {
   local compose_file_path="${NOMAD_DIR}/compose.yml"
+  local compose_url
+
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    compose_url="$MANAGEMENT_COMPOSE_FILE_MACOS_URL"
+  else
+    compose_url="$MANAGEMENT_COMPOSE_FILE_URL"
+  fi
 
   echo -e "${YELLOW}#${RESET} Downloading docker-compose file for management...\\n"
-  if ! curl -fsSL "$MANAGEMENT_COMPOSE_FILE_URL" -o "$compose_file_path"; then
+  if ! curl -fsSL "$compose_url" -o "$compose_file_path"; then
     echo -e "${RED}#${RESET} Failed to download the docker compose file. Please check the URL and try again."
     exit 1
   fi
@@ -417,12 +483,21 @@ download_management_compose_file() {
 
   # Inject dynamic env values into the compose file
   echo -e "${YELLOW}#${RESET} Configuring docker-compose file env variables...\\n"
-  sed -i "s|URL=replaceme|URL=http://${local_ip_address}:8080|g" "$compose_file_path"
-  sed -i "s|APP_KEY=replaceme|APP_KEY=${app_key}|g" "$compose_file_path"
-  
-  sed -i "s|DB_PASSWORD=replaceme|DB_PASSWORD=${db_user_password}|g" "$compose_file_path"
-  sed -i "s|MYSQL_ROOT_PASSWORD=replaceme|MYSQL_ROOT_PASSWORD=${db_root_password}|g" "$compose_file_path"
-  sed -i "s|MYSQL_PASSWORD=replaceme|MYSQL_PASSWORD=${db_user_password}|g" "$compose_file_path"
+
+  # macOS sed requires an explicit empty string argument for in-place editing
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    sed -i '' "s|URL=replaceme|URL=http://${local_ip_address}:8080|g" "$compose_file_path"
+    sed -i '' "s|APP_KEY=replaceme|APP_KEY=${app_key}|g" "$compose_file_path"
+    sed -i '' "s|DB_PASSWORD=replaceme|DB_PASSWORD=${db_user_password}|g" "$compose_file_path"
+    sed -i '' "s|MYSQL_ROOT_PASSWORD=replaceme|MYSQL_ROOT_PASSWORD=${db_root_password}|g" "$compose_file_path"
+    sed -i '' "s|MYSQL_PASSWORD=replaceme|MYSQL_PASSWORD=${db_user_password}|g" "$compose_file_path"
+  else
+    sed -i "s|URL=replaceme|URL=http://${local_ip_address}:8080|g" "$compose_file_path"
+    sed -i "s|APP_KEY=replaceme|APP_KEY=${app_key}|g" "$compose_file_path"
+    sed -i "s|DB_PASSWORD=replaceme|DB_PASSWORD=${db_user_password}|g" "$compose_file_path"
+    sed -i "s|MYSQL_ROOT_PASSWORD=replaceme|MYSQL_ROOT_PASSWORD=${db_root_password}|g" "$compose_file_path"
+    sed -i "s|MYSQL_PASSWORD=replaceme|MYSQL_PASSWORD=${db_user_password}|g" "$compose_file_path"
+  fi
   
   echo -e "${GREEN}#${RESET} Docker compose file configured successfully.\\n"
 }
@@ -464,7 +539,12 @@ start_management_containers() {
 }
 
 get_local_ip() {
-  local_ip_address=$(hostname -I | awk '{print $1}')
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    # Try common interface names on macOS (en0 = Wi-Fi or first Ethernet, en1 = second interface)
+    local_ip_address=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+  else
+    local_ip_address=$(hostname -I | awk '{print $1}')
+  fi
   if [[ -z "$local_ip_address" ]]; then
     echo -e "${RED}#${RESET} Unable to determine local IP address. Please check your network configuration."
     exit 1
@@ -503,7 +583,7 @@ verify_gpu_setup() {
   fi
   
   # Check for AMD GPU
-  if command -v lspci &> /dev/null; then
+  if [[ "$OS_TYPE" != "macOS" ]] && command -v lspci &> /dev/null; then
     if lspci 2>/dev/null | grep -iE "amd|radeon" &> /dev/null; then
       echo -e "${YELLOW}○${RESET} AMD GPU detected (ROCm support not currently available)\\n"
     fi
@@ -538,7 +618,7 @@ success_message() {
 ###################################################################################################################################################################################################
 
 # Pre-flight checks
-check_is_debian_based
+detect_os
 check_is_bash
 check_has_sudo
 ensure_dependencies_installed

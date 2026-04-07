@@ -21,6 +21,7 @@ WHITE_R='\033[39m' # Same as GRAY_R for terminals with white background.
 GRAY_R='\033[39m'
 RED='\033[1;31m' # Light Red.
 GREEN='\033[1;32m' # Light Green.
+OS_TYPE=''
 
 ###################################################################################################################################################################################################
 #                                                                                                                                                                                                 #
@@ -36,6 +37,21 @@ check_has_sudo() {
     header_red
     echo -e "${RED}#${RESET} This script requires sudo permissions to run. Please run the script with sudo.\\n"
     echo -e "${RED}#${RESET} For example: sudo bash $(basename "$0")"
+    exit 1
+  fi
+}
+
+detect_os() {
+  local uname_out
+  uname_out="$(uname -s)"
+  case "${uname_out}" in
+    Linux*)   OS_TYPE=Linux;;
+    Darwin*)  OS_TYPE=macOS;;
+    *)        OS_TYPE=Unknown;;
+  esac
+  echo -e "${GREEN}#${RESET} Detected OS: ${OS_TYPE}\\n"
+  if [[ "$OS_TYPE" == "Unknown" ]]; then
+    echo -e "${RED}#${RESET} Unsupported operating system: ${uname_out}. This script supports Linux (Debian-based) and macOS only.\\n"
     exit 1
   fi
 }
@@ -84,12 +100,31 @@ ensure_docker_installed_and_running() {
     exit 1
   fi
 
-  if ! systemctl is-active --quiet docker; then
-    echo -e "${RED}#${RESET} Docker is not running. Attempting to start Docker..."
-    sudo systemctl start docker
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    # On macOS, Docker runs as Docker Desktop — use `docker info` to check if it is running
+    if ! docker info &> /dev/null 2>&1; then
+      echo -e "${YELLOW}#${RESET} Docker Desktop is installed but not running. Attempting to start it...\\n"
+      open -a Docker
+      # Wait up to 60 seconds for Docker to become available
+      local retries=30
+      while ! docker info &> /dev/null 2>&1 && [[ $retries -gt 0 ]]; do
+        sleep 2
+        ((retries--))
+      done
+      if ! docker info &> /dev/null 2>&1; then
+        echo -e "${RED}#${RESET} Docker Desktop did not start in time. Please start Docker Desktop manually and run this script again."
+        exit 1
+      fi
+      echo -e "${GREEN}#${RESET} Docker Desktop started successfully.\\n"
+    fi
+  else
     if ! systemctl is-active --quiet docker; then
-      echo -e "${RED}#${RESET} Failed to start Docker. Please start Docker and try again."
-      exit 1
+      echo -e "${RED}#${RESET} Docker is not running. Attempting to start Docker..."
+      sudo systemctl start docker
+      if ! systemctl is-active --quiet docker; then
+        echo -e "${RED}#${RESET} Failed to start Docker. Please start Docker and try again."
+        exit 1
+      fi
     fi
   fi
 }
@@ -126,7 +161,11 @@ force_recreate() {
 }
 
 get_local_ip() {
-  local_ip_address=$(hostname -I | awk '{print $1}')
+  if [[ "$OS_TYPE" == "macOS" ]]; then
+    local_ip_address=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+  else
+    local_ip_address=$(hostname -I | awk '{print $1}')
+  fi
   if [[ -z "$local_ip_address" ]]; then
     echo -e "${RED}#${RESET} Unable to determine local IP address. Please check your network configuration."
     # Don't exit if we can't determine the local IP address, it's not critical for the installation
@@ -148,7 +187,7 @@ success_message() {
 ###################################################################################################################################################################################################
 
 # Pre-flight checks
-check_is_debian_based
+detect_os
 check_is_bash
 check_has_sudo
 
