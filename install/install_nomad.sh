@@ -583,7 +583,7 @@ verify_gpu_setup() {
   fi
   
   # Check for AMD GPU
-  if [[ "$OS_TYPE" != "macOS" ]] && command -v lspci &> /dev/null; then
+  if [[ "$OS_TYPE" == "Linux" ]] && command -v lspci &> /dev/null; then
     if lspci 2>/dev/null | grep -iE "amd|radeon" &> /dev/null; then
       echo -e "${YELLOW}○${RESET} AMD GPU detected (ROCm support not currently available)\\n"
     fi
